@@ -1,0 +1,51 @@
+services:
+
+  db:
+    image: postgres:16-alpine
+    container_name: finance_db
+    environment:
+      POSTGRES_DB: financedb
+      POSTGRES_USER: finance
+      POSTGRES_PASSWORD: finance
+      TZ: America/New_York
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    ports:
+      - "5433:5432"  # use 5433 on host to avoid conflict with any existing PostgreSQL
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finance -d financedb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    container_name: finance_backend
+    environment:
+      DATABASE_URL: postgresql://finance:finance@db:5432/financedb
+      # Path inside the container where bank_statements.csv is mounted.
+      # The external automation service writes to ./data/bank_statements.csv on the host.
+      BANK_STATEMENTS_CSV: /data/bank_statements.csv
+      TZ: America/New_York
+    volumes:
+      - ./data:/data:ro          # read-only mount — automation service owns this file
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: finance_frontend
+    ports:
+      - "3001:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

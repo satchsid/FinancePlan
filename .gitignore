@@ -1,0 +1,17 @@
+# Data files containing private financial information
+data/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# IDEs and OS files
+.DS_Store
+.vscode/
+.idea/
