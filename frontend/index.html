@@ -143,6 +143,129 @@ tbody td{padding:10px 14px;font-size:14px;color:var(--text2)}
 ::-webkit-scrollbar{width:5px;height:5px}
 ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
 ::-webkit-scrollbar-track{background:transparent}
+
+/* Modal Styling */
+.modal-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(15, 23, 42, 0.4);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease-out;
+}
+.modal-overlay.active {
+  opacity: 1;
+  pointer-events: auto;
+}
+.modal-container {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  width: 90%;
+  max-width: 800px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  transform: translateY(20px);
+  transition: transform 0.2s ease-out;
+  overflow: hidden;
+}
+.modal-overlay.active .modal-container {
+  transform: translateY(0);
+}
+.modal-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.modal-title {
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.modal-close {
+  background: none;
+  border: none;
+  font-size: 20px;
+  color: var(--text3);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+.modal-close:hover {
+  background: var(--surface2);
+  color: var(--text2);
+}
+.modal-body {
+  padding: 20px;
+  overflow-y: auto;
+  flex: 1;
+}
+.modal-footer {
+  padding: 14px 20px;
+  border-top: 1px solid var(--border);
+  background: var(--surface2);
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+/* Upload styles */
+.upload-zone {
+  border: 2px dashed var(--border2);
+  border-radius: 12px;
+  padding: 30px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+  background: var(--surface2);
+  margin-bottom: 18px;
+}
+.upload-zone:hover, .upload-zone.dragover {
+  border-color: var(--accent);
+  background: #f5f7ff;
+}
+.upload-zone-icon {
+  font-size: 32px;
+  margin-bottom: 10px;
+  display: inline-block;
+  color: var(--accent2);
+}
+.upload-zone-text {
+  font-weight: 500;
+  color: var(--text2);
+  margin-bottom: 4px;
+}
+.upload-zone-subtext {
+  font-size: 12px;
+  color: var(--text3);
+}
+
+/* Duplicate warning badge */
+.badge.duplicate-warning {
+  background: #fffbeb;
+  color: #b45309;
+  border: 1px solid #fde68a;
+  cursor: help;
+}
+.dup-reason {
+  font-size: 11px;
+  color: var(--yellow);
+  margin-top: 2px;
+  font-weight: 500;
+}
 </style>
 </head>
 <body>
@@ -206,7 +329,14 @@ function fmt(n) {
 }
 
 async function api(path, opts={}) {
-  const r = await fetch(API + path, {headers:{'Content-Type':'application/json'}, ...opts});
+  const headers = {};
+  if (!(opts.body instanceof FormData)) {
+    headers['Content-Type'] = 'application/json';
+  }
+  const r = await fetch(API + path, {
+    headers: { ...headers, ...opts.headers },
+    ...opts
+  });
   if (!r.ok) throw new Error('HTTP ' + r.status);
   if (r.status === 204) return null;
   return r.json();
@@ -609,7 +739,12 @@ async function renderDashboard(year, month) {
 async function renderLedger(year, month) {
   const content = document.getElementById('content');
   content.innerHTML = '';
-  content.appendChild(el('div',{class:'page-title'},'Ledger'));
+  const titleRow = el('div', {style: 'display:flex; justify-content:space-between; align-items:center; margin-bottom:6px'});
+  titleRow.appendChild(el('div', {class:'page-title'}, 'Ledger'));
+  const uploadBtn = el('button', {class: 'btn btn-primary btn-sm'}, '📤 Upload Checking CSV');
+  uploadBtn.addEventListener('click', () => openUploadModal(year, month));
+  titleRow.appendChild(uploadBtn);
+  content.appendChild(titleRow);
 
   let allTx=[], sortCol='date', sortDir='desc', filterType='all', filterAcct='all', filterSearch='';
 
@@ -909,6 +1044,253 @@ async function renderTransfers(year, month) {
     });
     tbl.appendChild(tbody); wrap.appendChild(tbl); content.appendChild(wrap);
   }catch(e){content.querySelector('.loading')?.remove();toast('Load failed: '+e.message,'error');}
+}
+
+async function openUploadModal(year, month) {
+  // Check if modal container already exists
+  let overlay = document.getElementById('upload-modal-overlay');
+  if (!overlay) {
+    overlay = el('div', {id: 'upload-modal-overlay', class: 'modal-overlay'});
+    document.body.appendChild(overlay);
+  }
+  
+  overlay.innerHTML = '';
+  
+  const container = el('div', {class: 'modal-container'});
+  const header = el('div', {class: 'modal-header'});
+  header.appendChild(el('div', {class: 'modal-title'}, 'Upload Checking Account CSV'));
+  const closeBtn = el('button', {class: 'modal-close'}, '✕');
+  closeBtn.addEventListener('click', () => overlay.classList.remove('active'));
+  header.appendChild(closeBtn);
+  container.appendChild(header);
+  
+  const body = el('div', {class: 'modal-body'});
+  
+  // Selection of account
+  const acctRow = el('div', {style: 'margin-bottom:16px; display:flex; gap:12px; align-items:center'});
+  acctRow.appendChild(el('label', {style: 'font-size:13px; font-weight:600'}, 'Target Account:'));
+  const acctSel = el('select', {class: 'btn btn-secondary', style: 'padding: 6px 12px; border-radius: 8px; font-family: inherit'});
+  ACCOUNTS.forEach(a => {
+    const opt = el('option', {value: a}, a);
+    if (a === 'Chase') opt.selected = true; // default to Chase checking
+    acctSel.appendChild(opt);
+  });
+  acctRow.appendChild(acctSel);
+  body.appendChild(acctRow);
+  
+  const fileInput = el('input', {type: 'file', accept: '.csv', style: 'display:none'});
+  
+  const zone = el('div', {class: 'upload-zone'});
+  zone.appendChild(el('span', {class: 'upload-zone-icon'}, '📁'));
+  zone.appendChild(el('div', {class: 'upload-zone-text'}, 'Drag and drop your checking CSV file here, or click to browse'));
+  zone.appendChild(el('div', {class: 'upload-zone-subtext'}, 'Supported columns: Date, Description/Payee, Amount (positive or negative)'));
+  
+  zone.addEventListener('click', () => fileInput.click());
+  
+  // Drag and drop events
+  ['dragenter', 'dragover'].forEach(e => {
+    zone.addEventListener(e, (ev) => {
+      ev.preventDefault();
+      zone.classList.add('dragover');
+    });
+  });
+  ['dragleave', 'drop'].forEach(e => {
+    zone.addEventListener(e, (ev) => {
+      ev.preventDefault();
+      zone.classList.remove('dragover');
+    });
+  });
+  
+  let selectedFile = null;
+  
+  zone.addEventListener('drop', (ev) => {
+    if (ev.dataTransfer.files.length) {
+      selectedFile = ev.dataTransfer.files[0];
+      handleFileSelected();
+    }
+  });
+  
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files.length) {
+      selectedFile = fileInput.files[0];
+      handleFileSelected();
+    }
+  });
+  
+  body.appendChild(fileInput);
+  body.appendChild(zone);
+  
+  const previewContainer = el('div', {style: 'margin-top: 16px'});
+  body.appendChild(previewContainer);
+  container.appendChild(body);
+  
+  const footer = el('div', {class: 'modal-footer'});
+  const cancelBtn = el('button', {class: 'btn btn-secondary'}, 'Cancel');
+  cancelBtn.addEventListener('click', () => overlay.classList.remove('active'));
+  const importBtn = el('button', {class: 'btn btn-primary', disabled: true}, '✓ Import Transactions');
+  footer.appendChild(cancelBtn);
+  footer.appendChild(importBtn);
+  container.appendChild(footer);
+  
+  overlay.appendChild(container);
+  
+  // Trigger layout & show
+  setTimeout(() => overlay.classList.add('active'), 10);
+  
+  let parsedTransactions = [];
+  
+  async function handleFileSelected() {
+    zone.innerHTML = '';
+    zone.appendChild(el('span', {class: 'upload-zone-icon'}, '📄'));
+    zone.appendChild(el('div', {class: 'upload-zone-text'}, selectedFile.name));
+    zone.appendChild(el('div', {class: 'upload-zone-subtext'}, `${(selectedFile.size / 1024).toFixed(1)} KB`));
+    
+    previewContainer.innerHTML = '';
+    previewContainer.appendChild(spinner());
+    
+    try {
+      const formData = new FormData();
+      formData.append('file', selectedFile);
+      
+      const targetAccount = acctSel.value;
+      const resp = await api(`/transactions/upload-checking/preview?year=${year}&month=${month+1}&account=${targetAccount}`, {
+        method: 'POST',
+        body: formData
+      });
+      
+      parsedTransactions = resp;
+      renderPreviewTable();
+    } catch(err) {
+      previewContainer.innerHTML = `<div class="alert error">Failed to parse CSV: ${err.message}</div>`;
+    }
+  }
+  
+  function renderPreviewTable() {
+    previewContainer.innerHTML = '';
+    if (!parsedTransactions.length) {
+      previewContainer.appendChild(emptyState('No transactions found for this month in the CSV'));
+      importBtn.disabled = true;
+      return;
+    }
+    
+    previewContainer.appendChild(el('div', {class: 'card-title', style: 'margin-bottom: 8px'}, 'Preview & Select Transactions'));
+    
+    const wrap = el('div', {class: 'tbl-wrap', style: 'max-height: 350px; overflow-y: auto'});
+    const tbl = el('table');
+    const thead = el('thead');
+    const hr = el('tr');
+    
+    const selectAllTh = el('th', {style: 'width: 40px'});
+    const selectAllCh = el('input', {type: 'checkbox'});
+    selectAllTh.appendChild(selectAllCh);
+    hr.appendChild(selectAllTh);
+    
+    ['Date', 'Description', 'Amount', 'Category', 'Duplicate?'].forEach(h => {
+      hr.appendChild(el('th', {}, h));
+    });
+    thead.appendChild(hr);
+    tbl.appendChild(thead);
+    
+    const tbody = el('tbody');
+    const rowCheckboxes = [];
+    
+    parsedTransactions.forEach((tx, idx) => {
+      const tr = el('tr');
+      if (tx.is_duplicate) {
+        tr.style.background = '#fffbeb';
+      }
+      
+      const chTd = el('td');
+      const ch = el('input', {type: 'checkbox'});
+      ch.checked = !tx.is_duplicate;
+      chTd.appendChild(ch);
+      tr.appendChild(chTd);
+      rowCheckboxes.push(ch);
+      
+      tr.appendChild(el('td', {style: 'font-family: DM Mono, monospace; font-size:12px'}, tx.date));
+      tr.appendChild(el('td', {}, tx.description));
+      tr.appendChild(el('td', {style: `font-family: DM Mono, monospace; color: ${tx.type === 'Income' ? 'var(--green)' : 'var(--red)'}`}, (tx.type === 'Income' ? '+' : '-') + fmt(tx.amount)));
+      
+      const catTd = el('td');
+      const catS = el('select', {style: 'background: var(--surface); border: 1px solid var(--border); padding: 4px; border-radius: 6px; font-size: 13px; font-family: inherit'});
+      ['', 'Utilities', 'Food', 'Dining', 'Transportation', 'Housing', 'Entertainment', 'Bills', 'Credit Card Bill', 'Debt', 'Insurance', 'Income', 'Transfer'].forEach(c => {
+        const o = el('option', {value: c}, c || 'Select Category');
+        if (tx.category === c) o.selected = true;
+        catS.appendChild(o);
+      });
+      catS.addEventListener('change', (e) => {
+        tx.category = e.target.value;
+      });
+      catTd.appendChild(catS);
+      tr.appendChild(catTd);
+      
+      const dupTd = el('td');
+      if (tx.is_duplicate) {
+        const badge = el('span', {class: 'badge duplicate-warning', title: tx.duplicate_reason}, '⚠️ Duplicate');
+        dupTd.appendChild(badge);
+        dupTd.appendChild(el('div', {class: 'dup-reason'}, tx.duplicate_reason));
+      } else {
+        dupTd.appendChild(el('span', {class: 'badge green'}, '✓ New'));
+      }
+      tr.appendChild(dupTd);
+      
+      tbody.appendChild(tr);
+    });
+    
+    selectAllCh.checked = rowCheckboxes.every(cb => cb.checked);
+    
+    selectAllCh.addEventListener('change', () => {
+      rowCheckboxes.forEach(cb => cb.checked = selectAllCh.checked);
+      updateImportButtonState();
+    });
+    
+    rowCheckboxes.forEach(cb => {
+      cb.addEventListener('change', () => {
+        updateImportButtonState();
+        selectAllCh.checked = rowCheckboxes.every(r => r.checked);
+      });
+    });
+    
+    tbl.appendChild(tbody);
+    wrap.appendChild(tbl);
+    previewContainer.appendChild(wrap);
+    
+    updateImportButtonState();
+    
+    function updateImportButtonState() {
+      const selectedCount = rowCheckboxes.filter(cb => cb.checked).length;
+      importBtn.disabled = selectedCount === 0;
+      importBtn.textContent = `✓ Import ${selectedCount} Transaction(s)`;
+    }
+    
+    const newImportBtn = importBtn.cloneNode(true);
+    importBtn.replaceWith(newImportBtn);
+    newImportBtn.addEventListener('click', async () => {
+      newImportBtn.disabled = true;
+      newImportBtn.textContent = 'Importing...';
+      
+      const selectedTxs = [];
+      rowCheckboxes.forEach((cb, idx) => {
+        if (cb.checked) {
+          selectedTxs.push(parsedTransactions[idx]);
+        }
+      });
+      
+      try {
+        const res = await api('/transactions/upload-checking/import', {
+          method: 'POST',
+          body: JSON.stringify({ transactions: selectedTxs })
+        });
+        toast(`Successfully imported ${res.imported} transactions!`);
+        overlay.classList.remove('active');
+        renderLedger(year, month);
+      } catch(err) {
+        toast(`Import failed: ${err.message}`, 'error');
+        newImportBtn.disabled = false;
+        newImportBtn.textContent = `✓ Import ${selectedTxs.length} Transaction(s)`;
+      }
+    });
+  }
 }
 
 // ── Router ────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
@@ -9,6 +9,7 @@ from psycopg2.extras import RealDictCursor
 import pandas as pd
 import json
 import pytz
+import io
 
 EASTERN = pytz.timezone("America/New_York")
 
@@ -373,6 +374,204 @@ def get_summary(year: int = Query(...), month: int = Query(...)):
             by_category = [dict(r) for r in cur.fetchall()]
 
             return {"by_account": by_account, "by_category": by_category}
+    finally:
+        conn.close()
+
+def parse_checking_csv(df: pd.DataFrame) -> List[dict]:
+    # Try to find Date column
+    date_col = None
+    for c in df.columns:
+        c_lower = str(c).lower()
+        if "date" in c_lower:
+            date_col = c
+            break
+    if date_col is None:
+        date_col = df.columns[0]
+        
+    # Try to find Description column
+    desc_col = None
+    for c in df.columns:
+        c_lower = str(c).lower()
+        if any(x in c_lower for x in ["desc", "payee", "name", "detail", "memo"]):
+            desc_col = c
+            break
+    if desc_col is None:
+        desc_col = df.columns[1] if len(df.columns) > 1 else df.columns[0]
+        
+    # Try to find Amount column
+    amount_col = None
+    for c in df.columns:
+        c_lower = str(c).lower()
+        if any(x in c_lower for x in ["amount", "value", "debit", "credit", "price"]):
+            amount_col = c
+            break
+    if amount_col is None:
+        amount_col = df.columns[2] if len(df.columns) > 2 else df.columns[0]
+
+    transactions = []
+    for _, row in df.iterrows():
+        try:
+            raw_date = str(row[date_col]).strip()
+            raw_desc = str(row[desc_col]).strip()
+            raw_amt = str(row[amount_col]).strip()
+            
+            if pd.isna(raw_date) or pd.isna(raw_desc) or pd.isna(raw_amt):
+                continue
+            if raw_date == "nan" or raw_desc == "nan" or raw_amt == "nan":
+                continue
+            
+            # Parse Date
+            parsed_date = None
+            for fmt in ["%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%d/%m/%Y", "%d/%m/%y"]:
+                try:
+                    parsed_date = datetime.strptime(raw_date, fmt).date()
+                    break
+                except ValueError:
+                    continue
+            if parsed_date is None:
+                try:
+                    parsed_date = pd.to_datetime(raw_date).date()
+                except Exception:
+                    continue
+            
+            # Parse Amount
+            clean_amt = raw_amt.replace("$", "").replace(",", "").strip()
+            if clean_amt.startswith("(") and clean_amt.endswith(")"):
+                amt_val = -float(clean_amt[1:-1])
+            else:
+                amt_val = float(clean_amt)
+                
+            if pd.isna(amt_val) or amt_val == 0:
+                continue
+                
+            if amt_val < 0:
+                tx_type = "Expense"
+                tx_amt = abs(amt_val)
+            else:
+                tx_type = "Income"
+                tx_amt = amt_val
+                
+            # Guess Category based on description
+            category = ""
+            desc_lower = raw_desc.lower()
+            if any(x in desc_lower for x in ["netflix", "spotify", "hulu", "disney", "youtube"]):
+                category = "Entertainment"
+            elif any(x in desc_lower for x in ["grocer", "whole foods", "trader joe", "kroger", "supermarket", "safeway"]):
+                category = "Groceries"
+            elif any(x in desc_lower for x in ["restaurant", "cafe", "mcdonald", "starbucks", "dunkin", "pizza", "burger", "uber eats", "doordash"]):
+                category = "Dining"
+            elif any(x in desc_lower for x in ["gas", "shell", "mobil", "chevron", "exxon", "bp", "fuel", "chevron"]):
+                category = "Transportation"
+            elif any(x in desc_lower for x in ["utilities", "electric", "power", "water", "trash", "comcast", "verizon", "at&t", "internet"]):
+                category = "Utilities"
+            elif any(x in desc_lower for x in ["salary", "paycheck", "payroll", "direct deposit"]):
+                category = "Income"
+            elif any(x in desc_lower for x in ["transfer", "wire"]):
+                category = "Transfer"
+            elif any(x in desc_lower for x in ["mortgage", "rent", "hoa"]):
+                category = "Housing"
+            elif any(x in desc_lower for x in ["discover", "chase card", "capital one", "citi"]):
+                category = "Credit Card Bill"
+                
+            transactions.append({
+                "date": parsed_date.strftime("%Y-%m-%d"),
+                "description": raw_desc,
+                "amount": tx_amt,
+                "type": tx_type,
+                "category": category
+            })
+        except Exception:
+            continue
+            
+    return transactions
+
+def find_duplicate_transaction(tx_date, tx_desc, tx_amount, tx_type, existing_txs):
+    tx_desc_lower = tx_desc.lower()
+    for ext in existing_txs:
+        if ext['type'] != tx_type:
+            continue
+        if abs(float(ext['amount']) - tx_amount) >= 0.01:
+            continue
+        
+        ext_desc_lower = ext['description'].lower()
+        if ext_desc_lower == tx_desc_lower:
+            return ext
+        if ext_desc_lower in tx_desc_lower or tx_desc_lower in ext_desc_lower:
+            return ext
+            
+        common_banks = ['discover', 'capital one', 'chase', 'citi', 'amazon', 'robinhood', 'wealthfront', 'amex', 'fidelity', 'boa', 'bank of america']
+        for bank in common_banks:
+            if bank in ext_desc_lower and bank in tx_desc_lower:
+                return ext
+                
+    return None
+
+class TransactionImportList(BaseModel):
+    transactions: List[Transaction]
+
+@app.post("/transactions/upload-checking/preview")
+async def preview_checking_upload(
+    year: int = Query(...),
+    month: int = Query(...),
+    account: str = Query("Chase"),
+    file: UploadFile = File(...)
+):
+    try:
+        contents = await file.read()
+        df = pd.read_csv(io.BytesIO(contents))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to parse CSV: {str(e)}")
+        
+    parsed = parse_checking_csv(df)
+    
+    filtered_parsed = []
+    for tx in parsed:
+        dt_val = datetime.strptime(tx["date"], "%Y-%m-%d")
+        if dt_val.year == year and dt_val.month == month:
+            tx["account"] = account
+            filtered_parsed.append(tx)
+            
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT * FROM transactions
+                WHERE EXTRACT(YEAR FROM date) = %s AND EXTRACT(MONTH FROM date) = %s
+            """, (year, month))
+            existing_txs = [dict(r) for r in cur.fetchall()]
+            
+            for tx in filtered_parsed:
+                duplicate = find_duplicate_transaction(tx["date"], tx["description"], tx["amount"], tx["type"], existing_txs)
+                if duplicate:
+                    tx["is_duplicate"] = True
+                    tx["duplicate_reason"] = f"Matches '{duplicate['description']}' (${float(duplicate['amount']):.2f}) on {duplicate['date']}"
+                else:
+                    tx["is_duplicate"] = False
+                    tx["duplicate_reason"] = None
+    finally:
+        conn.close()
+        
+    return filtered_parsed
+
+@app.post("/transactions/upload-checking/import")
+def import_checking_transactions(payload: TransactionImportList):
+    conn = get_conn()
+    imported = 0
+    try:
+        with conn.cursor() as cur:
+            for tx in payload.transactions:
+                from datetime import datetime as dt
+                try:
+                    parsed_date = dt.strptime(tx.date, "%Y-%m-%d").date() if "-" in tx.date else dt.strptime(tx.date, "%m/%d/%Y").date()
+                except (ValueError, TypeError):
+                    raise HTTPException(status_code=400, detail=f"Invalid date format: {tx.date}")
+                cur.execute("""
+                    INSERT INTO transactions (date, description, amount, category, account, type)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (parsed_date, tx.description, tx.amount, tx.category, tx.account, tx.type))
+                imported += 1
+            conn.commit()
+        return {"imported": imported}
     finally:
         conn.close()
 
