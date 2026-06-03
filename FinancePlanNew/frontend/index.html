@@ -1069,6 +1069,7 @@ function renderUpcomingBills(year, month, txList, templates) {
   sortedTemplates.forEach(tpl => {
     // Find matching transactions in the current month's ledger
     const matches = (txList || []).filter(t => {
+      if (t.type !== tpl.type) return false;
       const descT = t.description.toLowerCase();
       const descTpl = tpl.description.toLowerCase();
       return descT.includes(descTpl) || descTpl.includes(descT);
