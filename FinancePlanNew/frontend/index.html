@@ -1526,16 +1526,7 @@ async function openUploadModal(year, month) {
         method: 'POST',
         body: formData
       });
-      
-      const rules = JSON.parse(localStorage.getItem('rules') || '[]');
-      parsedTransactions = resp.map(tx => {
-        const descLower = tx.description.toLowerCase();
-        const matchingRule = rules.find(r => descLower.includes(r.keyword.toLowerCase()));
-        if (matchingRule) {
-          tx.category = matchingRule.category;
-        }
-        return tx;
-      });
+      parsedTransactions = resp;
       renderPreviewTable();
     } catch(err) {
       previewContainer.innerHTML = `<div class="alert error">Failed to parse CSV: ${err.message}</div>`;
