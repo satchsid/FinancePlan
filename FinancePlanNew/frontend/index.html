@@ -1059,16 +1059,6 @@ function renderUpcomingBills(year, month, txList, templates) {
   const card = el('div', {class: 'card'});
   card.appendChild(el('div', {class: 'card-title'}, 'Upcoming Bills & Reminders'));
   
-  const paidTemplates = new Set();
-  (txList || []).forEach(t => {
-    (templates||[]).forEach(tpl => {
-      if (t.description.toLowerCase().includes(tpl.description.toLowerCase()) || 
-          tpl.description.toLowerCase().includes(t.description.toLowerCase())) {
-        paidTemplates.add(tpl.id || tpl.description);
-      }
-    });
-  });
-  
   const list = el('div', {style: 'display: flex; flex-direction: column; gap: 10px'});
   const sortedTemplates = [...(templates||[])].sort((a,b) => a.due_day - b.due_day);
   
@@ -1077,13 +1067,54 @@ function renderUpcomingBills(year, month, txList, templates) {
   }
   
   sortedTemplates.forEach(tpl => {
-    const isPaid = paidTemplates.has(tpl.id || tpl.description);
+    // Find matching transactions in the current month's ledger
+    const matches = (txList || []).filter(t => {
+      const descT = t.description.toLowerCase();
+      const descTpl = tpl.description.toLowerCase();
+      return descT.includes(descTpl) || descTpl.includes(descT);
+    });
+    
+    // Determine status and amount
+    const paidMatch = matches.find(t => t.date <= TODAY);
+    const futureMatch = matches.find(t => t.date > TODAY);
+    
+    let isPaid = false;
+    let displayAmount = tpl.amount;
+    let statusColor = 'var(--yellow)';
+    
+    if (paidMatch) {
+      isPaid = true;
+      displayAmount = paidMatch.amount;
+      statusColor = 'var(--green)';
+    } else if (futureMatch) {
+      isPaid = false;
+      displayAmount = futureMatch.amount;
+      statusColor = 'var(--yellow)';
+    } else {
+      // Check if the due date for the current period has already passed
+      let dueStr = '';
+      try {
+        const dueDayStr = String(tpl.due_day).padStart(2, '0');
+        const monthStr = String(month + 1).padStart(2, '0');
+        dueStr = `${year}-${monthStr}-${dueDayStr}`;
+      } catch (e) {
+        dueStr = '';
+      }
+      
+      if (dueStr && dueStr < TODAY) {
+        isPaid = false;
+        statusColor = 'var(--red)'; // Overdue
+      } else {
+        isPaid = false;
+        statusColor = 'var(--yellow)'; // Upcoming
+      }
+    }
     
     const row = el('div', {style: 'display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px dashed var(--border)'});
     
     const left = el('div', {style: 'display: flex; align-items: center; gap: 8px'});
     const statusDot = el('span', {
-      style: `display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: ${isPaid ? 'var(--green)' : 'var(--yellow)'}`
+      style: `display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: ${statusColor}`
     });
     left.appendChild(statusDot);
     
@@ -1094,7 +1125,7 @@ function renderUpcomingBills(year, month, txList, templates) {
     row.appendChild(left);
     
     const right = el('div', {style: 'text-align: right'});
-    right.appendChild(el('div', {style: `font-size: 12px; font-weight: 600; font-family: DM Mono, monospace; ${isPaid ? 'opacity: 0.5;' : ''}`}, fmt(tpl.amount)));
+    right.appendChild(el('div', {style: `font-size: 12px; font-weight: 600; font-family: DM Mono, monospace; ${isPaid ? 'opacity: 0.5;' : ''}`}, fmt(displayAmount)));
     right.appendChild(el('div', {style: 'font-size: 10px; color: var(--text3)'}, `Due: Day ${tpl.due_day}`));
     row.appendChild(right);
     
