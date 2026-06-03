@@ -509,28 +509,164 @@ def find_duplicate_transaction(tx_date, tx_desc, tx_amount, tx_type, existing_tx
 class TransactionImportList(BaseModel):
     transactions: List[Transaction]
 
-@app.post("/transactions/upload-checking/preview")
-async def preview_checking_upload(
+def simplify_desc(desc: str) -> str:
+    d = desc.lower().strip()
+    if "target" in d:
+        return "target"
+    if "affirm" in d:
+        return "affirm"
+    if "brookwood" in d:
+        return "hoa"
+    if "freedom" in d or "mortgage" in d:
+        return "mortgage"
+    if "payroll" in d or "alight" in d:
+        return "pay"
+    if "interest" in d:
+        return "interest"
+    words = [w for w in d.split() if len(w) > 1]
+    return words[0] if words else d
+
+def simplify_ledger_desc(desc: str) -> str:
+    d = desc.lower().strip()
+    if "target" in d:
+        return "target"
+    if "affirm" in d:
+        return "affirm"
+    if "hoa" in d:
+        return "hoa"
+    if "mortgage" in d or "freedom" in d:
+        return "mortgage"
+    if "pay" in d or "salary" in d:
+        return "pay"
+    if "interest" in d:
+        return "interest"
+    words = [w for w in d.split() if len(w) > 1]
+    return words[0] if words else d
+
+def find_subset_sum(numbers, target, tolerance=0.01):
+    n = len(numbers)
+    def backtrack(index, current_sum, path):
+        if abs(current_sum - target) <= tolerance:
+            return path
+        if index >= n:
+            return None
+        # Try including
+        val, item = numbers[index]
+        res = backtrack(index + 1, current_sum + val, path + [item])
+        if res is not None:
+            return res
+        # Try excluding
+        return backtrack(index + 1, current_sum, path)
+    return backtrack(0, 0.0, [])
+
+@app.post("/transactions/upload-checking")
+def upload_checking(
+    file: UploadFile = File(...),
     year: int = Query(...),
     month: int = Query(...),
-    account: str = Query("Chase"),
-    file: UploadFile = File(...)
+    account: str = Query("Wealthfront"),
+    commit: bool = Query(False)
 ):
     try:
-        contents = await file.read()
-        df = pd.read_csv(io.BytesIO(contents))
+        content = file.file.read().decode('utf-8')
+        df = pd.read_csv(io.StringIO(content), index_col=False)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse CSV: {str(e)}")
-        
-    parsed = parse_checking_csv(df)
+        raise HTTPException(status_code=400, detail=f"Failed to parse CSV file: {str(e)}")
+
+    df.columns = [c.strip() for c in df.columns]
     
-    filtered_parsed = []
-    for tx in parsed:
-        dt_val = datetime.strptime(tx["date"], "%Y-%m-%d")
-        if dt_val.year == year and dt_val.month == month:
-            tx["account"] = account
-            filtered_parsed.append(tx)
+    # Dynamically locate columns to support both Wealthfront and Chase headers
+    date_col = None
+    for col in df.columns:
+        if "date" in col.lower():
+            date_col = col
+            break
             
+    desc_col = None
+    for col in df.columns:
+        if "description" in col.lower() or "desc" in col.lower():
+            desc_col = col
+            break
+            
+    amount_col = None
+    for col in df.columns:
+        if "amount" in col.lower():
+            amount_col = col
+            break
+
+    type_col = None
+    # "Details" specifies CREDIT/DEBIT in Chase CSVs and maps directly to Deposit/Withdrawal type
+    if "details" in [c.lower() for c in df.columns]:
+        for col in df.columns:
+            if col.lower() == "details":
+                type_col = col
+                break
+    else:
+        for col in df.columns:
+            if col.lower() == "type":
+                type_col = col
+                break
+
+    if not date_col or not desc_col or not amount_col:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"CSV must contain at least date, description, and amount columns. Found: {list(df.columns)}"
+        )
+
+    checking_txs = []
+    import re
+    for idx, row in df.iterrows():
+        raw_date = row[date_col]
+        desc = row[desc_col]
+        tx_type = row[type_col] if type_col else ""
+        try:
+            amount = float(row[amount_col])
+        except ValueError:
+            amount = 0.0
+            
+        try:
+            parsed_date = pd.to_datetime(raw_date).date()
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"Invalid date format in CSV: {raw_date}")
+
+        # Collapse multiple spaces in description (common in Chase files)
+        clean_desc = re.sub(r'\s+', ' ', str(desc)).strip()
+
+        # Map type dynamically based on string content or sign
+        tx_type_lower = str(tx_type).lower() if tx_type else ""
+        if "deposit" in tx_type_lower or "interest" in tx_type_lower or "credit" in tx_type_lower or amount > 0:
+            mapped_type = "Income"
+        else:
+            mapped_type = "Expense"
+
+        checking_txs.append({
+            "id": idx,
+            "date": parsed_date,
+            "description": clean_desc,
+            "type": mapped_type,
+            "amount": amount
+        })
+
+    # Filter to selected month/year
+    checking_txs = [tx for tx in checking_txs if tx['date'].year == year and tx['date'].month == month]
+
+    import re
+    patterns = [
+        r'\bciti\b',
+        r'\brobinhood\b',
+        r'\bdiscover\b',
+        r'\bamex\b',
+        r'\bamazon\b',
+        r'\bamz\b',
+        r'\bchase\b',
+        r'\bcapital one\b',
+        r'\bcapitalone\b',
+        r'\bbank of america\b',
+        r'\bboa\b',
+        r'\bapplecard\b',
+        r'\bapple card\b'
+    ]
+
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -538,42 +674,116 @@ async def preview_checking_upload(
                 SELECT * FROM transactions
                 WHERE EXTRACT(YEAR FROM date) = %s AND EXTRACT(MONTH FROM date) = %s
             """, (year, month))
-            existing_txs = [dict(r) for r in cur.fetchall()]
-            
-            for tx in filtered_parsed:
-                duplicate = find_duplicate_transaction(tx["date"], tx["description"], tx["amount"], tx["type"], existing_txs)
-                if duplicate:
-                    tx["is_duplicate"] = True
-                    tx["duplicate_reason"] = f"Matches '{duplicate['description']}' (${float(duplicate['amount']):.2f}) on {duplicate['date']}"
-                else:
-                    tx["is_duplicate"] = False
-                    tx["duplicate_reason"] = None
+            ledger_txs = [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
-        
-    return filtered_parsed
 
-@app.post("/transactions/upload-checking/import")
-def import_checking_transactions(payload: TransactionImportList):
-    conn = get_conn()
-    imported = 0
-    try:
-        with conn.cursor() as cur:
-            for tx in payload.transactions:
-                from datetime import datetime as dt
-                try:
-                    parsed_date = dt.strptime(tx.date, "%Y-%m-%d").date() if "-" in tx.date else dt.strptime(tx.date, "%m/%d/%Y").date()
-                except (ValueError, TypeError):
-                    raise HTTPException(status_code=400, detail=f"Invalid date format: {tx.date}")
-                cur.execute("""
-                    INSERT INTO transactions (date, description, amount, category, account, type)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                """, (parsed_date, tx.description, tx.amount, tx.category, tx.account, tx.type))
-                imported += 1
-            conn.commit()
-        return {"imported": imported}
-    finally:
-        conn.close()
+    matched_ledger_ids = set()
+    matched_checking_ids = set()
+
+    ignored_statement_txs = []
+    duplicate_txs = []
+    new_txs = []
+
+    # 1. Classify credit card statement payments
+    for tx in checking_txs:
+        is_stmt = (tx['amount'] < 0) and any(re.search(pat, tx['description'].lower()) for pat in patterns)
+        if is_stmt:
+            ignored_statement_txs.append({
+                "date": str(tx['date']),
+                "description": tx['description'],
+                "amount": tx['amount'],
+                "reason": "Credit Card/Statement Autopay"
+            })
+            matched_checking_ids.add(tx['id'])
+
+    # 2. Find exact matches
+    for l_tx in ledger_txs:
+        l_amount = float(l_tx['amount'])
+        for tx in checking_txs:
+            if tx['id'] in matched_checking_ids:
+                continue
+            if tx['type'] != l_tx['type']:
+                continue
+            if abs(abs(tx['amount']) - l_amount) < 0.01:
+                date_diff = abs((tx['date'] - l_tx['date']).days)
+                if date_diff <= 3:
+                    matched_checking_ids.add(tx['id'])
+                    matched_ledger_ids.add(l_tx['id'])
+                    duplicate_txs.append({
+                        "date": str(tx['date']),
+                        "description": tx['description'],
+                        "amount": tx['amount'],
+                        "matched_ledger": {
+                            "date": str(l_tx['date']),
+                            "description": l_tx['description'],
+                            "amount": float(l_tx['amount'])
+                        }
+                    })
+                    break
+
+    # 3. Find subset combination matches for grouped ledger entries
+    for l_tx in ledger_txs:
+        if l_tx['id'] in matched_ledger_ids:
+            continue
+        l_amount = float(l_tx['amount'])
+        pool = []
+        for tx in checking_txs:
+            if tx['id'] in matched_checking_ids:
+                continue
+            date_diff = abs((tx['date'] - l_tx['date']).days)
+            if date_diff <= 3:
+                if simplify_desc(tx['description']) == simplify_ledger_desc(l_tx['description']):
+                    val = abs(tx['amount']) if tx['type'] == l_tx['type'] else -abs(tx['amount'])
+                    pool.append((val, tx))
+
+        if pool:
+            subset = find_subset_sum(pool, l_amount)
+            if subset:
+                for tx in subset:
+                    matched_checking_ids.add(tx['id'])
+                    duplicate_txs.append({
+                        "date": str(tx['date']),
+                        "description": tx['description'],
+                        "amount": tx['amount'],
+                        "matched_ledger": {
+                            "date": str(l_tx['date']),
+                            "description": l_tx['description'],
+                            "amount": float(l_tx['amount'])
+                        }
+                    })
+                matched_ledger_ids.add(l_tx['id'])
+
+    # 4. Classify remaining unmatched checking transactions as "New"
+    for tx in checking_txs:
+        if tx['id'] not in matched_checking_ids:
+            new_txs.append({
+                "date": str(tx['date']),
+                "description": tx['description'],
+                "amount": tx['amount'],
+                "type": tx['type']
+            })
+
+    # If commit is requested, save the new transactions into the database
+    if commit and new_txs:
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                for tx in new_txs:
+                    cur.execute("""
+                        INSERT INTO transactions (date, description, amount, category, account, type)
+                        VALUES (%s, %s, %s, '', %s, %s)
+                    """, (tx["date"], tx["description"], abs(tx["amount"]), account, tx["type"]))
+                conn.commit()
+        finally:
+            conn.close()
+
+    return {
+        "ignored": ignored_statement_txs,
+        "duplicate": duplicate_txs,
+        "new": new_txs,
+        "committed": commit
+    }
 
 @app.get("/health")
 def health():
